@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeoJSON Satellite Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; margin: 0; font: 14px/1.45 system-ui, sans-serif; }
+  #app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+  header { padding: 10px 14px; background: #fff; border-bottom: 1px solid #ddd; z-index: 1000; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  button, select, input { font: inherit; }
+  button, select { padding: 5px 8px; }
+  #map { min-height: 300px; }
+  #status { margin-top: 5px; color: #444; }
+  .hint { margin-top: 4px; color: #555; font-size: 12px; }
+  a { color: #075eaa; }
+  @media (max-width: 600px) { header { padding: 8px; } .controls { gap: 7px; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="controls">
+      <label>GeoJSON <input id="file" type="file" accept=".geojson,.json,application/geo+json,application/json"></label>
+      <label>Input CRS
+        <select id="crs">
+          <option value="EPSG:3763" selected>EPSG:3763 — Portugal TM06</option>
+          <option value="EPSG:4326">EPSG:4326 — WGS84 lon/lat</option>
+        </select>
+      </label>
+    </div>
+    <div id="status">Upload a GeoJSON Feature or FeatureCollection. Coordinates are assumed to use the selected input CRS.</div>
+  </header>
+  <div id="map"></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.12.1/proj4.js"></script>
+<script>
+proj4.defs("EPSG:3763",
+  "+proj=tmerc +lat_0=39.6682583333333 +lon_0=-8.1331083333333 " +
+  "+k=1 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs +type=crs");
+
+const map = L.map("map", { preferCanvas: true });
+const imagery = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19, attribution: "Imagery © Esri and its providers" }
+).addTo(map);
+L.control.layers({ "Esri World Imagery": imagery }, null, { collapsed: false }).addTo(map);
+map.setView([37.15, -8.73], 13);
+
+let geoLayer = null;
+let lastBounds = null;
+let currentFeatures = null;
+
+function setStatus(message) { document.getElementById("status").textContent = message; }
+
+function transformCoords(coords, sourceCrs) {
+  if (!Array.isArray(coords)) throw new Error("Invalid GeoJSON coordinates.");
+  if (typeof coords[0] === "number") {
+    if (coords.length < 2) throw new Error("Coordinate pair must contain at least two numbers.");
+    if (sourceCrs === "EPSG:4326") return coords.slice();
+    // proj4 returns [longitude, latitude] for the target geographic CRS.
+    const xy = proj4(sourceCrs, "EPSG:4326", [coords[0], coords[1]]);
+    return [xy[0], xy[1], ...coords.slice(2)];
+  }
+  return coords.map(c => transformCoords(c, sourceCrs));
+}
+
+function normaliseGeoJSON(input, sourceCrs) {
+  let fc;
+  if (input && input.type === "FeatureCollection" && Array.isArray(input.features)) {
+    fc = JSON.parse(JSON.stringify(input));
+  } else if (input && input.type === "Feature") {
+    fc = { type: "FeatureCollection", features: [JSON.parse(JSON.stringify(input))] };
+  } else {
+    throw new Error("Expected a GeoJSON Feature or FeatureCollection.");
+  }
+  for (const feature of fc.features) {
+    if (!feature.geometry) continue;
+    feature.geometry.coordinates = transformCoords(feature.geometry.coordinates, sourceCrs);
+  }
+  return fc;
+}
+
+function showGeoJSON(input, label) {
+  try {
+    const sourceCrs = document.getElementById("crs").value;
+    const fc = normaliseGeoJSON(input, sourceCrs);
+    if (!fc.features.length) throw new Error("No features found.");
+    if (geoLayer) map.removeLayer(geoLayer);
+    geoLayer = L.geoJSON(fc, {
+      style: { color: "#00ffff", weight: 2, fillColor: "#00ffff", fillOpacity: 0.18 },
+      pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
+        radius: 6, color: "#00ffff", weight: 2, fillOpacity: 0.8
+      }),
+      onEachFeature: (feature, layer) => {
+        const props = feature.properties || {};
+        const popup = document.createElement("div");
+        const title = document.createElement("strong");
+        title.textContent = props.label || props.nic || "GeoJSON feature";
+        popup.appendChild(title);
+        const table = document.createElement("table");
+        table.style.marginTop = "6px";
+        for (const [key, value] of Object.entries(props)) {
+          const tr = document.createElement("tr");
+          const th = document.createElement("th");
+          const td = document.createElement("td");
+          th.textContent = key;
+          th.style.textAlign = "left";
+          th.style.paddingRight = "8px";
+          td.textContent = value === null || value === undefined ? "—" :
+            (typeof value === "object" ? JSON.stringify(value) : String(value));
+          tr.append(th, td); table.appendChild(tr);
+        }
+        popup.appendChild(table);
+        layer.bindPopup(popup);
+      }
+    }).addTo(map);
+    lastBounds = geoLayer.getBounds();
+    currentFeatures = fc;
+    if (lastBounds.isValid()) map.fitBounds(lastBounds, { padding: [30, 30], maxZoom: 18 });
+    setStatus(`Loaded ${fc.features.length} feature(s) from ${label}. CRS interpreted as ${sourceCrs}. Check the overlay against known landmarks before relying on it.`);
+  } catch (err) {
+    setStatus("Could not display GeoJSON: " + err.message);
+  }
+}
+
+document.getElementById("file").addEventListener("change", async event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    showGeoJSON(data, file.name);
+  } catch (err) {
+    setStatus("Could not read file: " + err.message);
+  }
+});
+
+function getCenterLonLat() {
+  if (lastBounds && lastBounds.isValid()) {
+    const c = lastBounds.getCenter();
+    return { lon: c.lng, lat: c.lat };
+  }
+  const c = map.getCenter();
+  return { lon: c.lng, lat: c.lat };
+}
+
+</script>
+</body>
+</html>
