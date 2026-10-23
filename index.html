@@ -50,7 +50,7 @@ const imagery = L.tileLayer(
   { maxZoom: 19, attribution: "Imagery © Esri and its providers" }
 ).addTo(map);
 L.control.layers({ "Esri World Imagery": imagery }, null, { collapsed: false }).addTo(map);
-map.setView([37.15, -8.73], 13);
+map.setView([39.6, -8.0], 7);
 
 let geoLayer = null;
 let lastBounds = null;
